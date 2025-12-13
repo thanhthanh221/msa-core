@@ -156,14 +156,32 @@ func (r *rabbitmqClient) PublishWithOptions(ctx context.Context, exchange, routi
 	// Inject tracing context into message headers for distributed tracing
 	carrier := &models.AMQPCarrier{Headers: publishing.Headers}
 	r.propagator.Inject(ctx, carrier)
+	publishing.Headers = carrier.Headers
+
+	if options.MessageID != "" {
+		publishing.MessageId = options.MessageID
+		// Also add to headers for easy access in consumer
+		if publishing.Headers == nil {
+			publishing.Headers = make(amqp.Table)
+		}
+		publishing.Headers["x-message-id"] = options.MessageID
+	}
+
+	// Log publisher trace info for debugging
+	if r.logger != nil {
+		spanCtx := trace.SpanFromContext(ctx).SpanContext()
+		if spanCtx.IsValid() {
+			traceparent := carrier.Get("traceparent")
+			r.logger.Debugf("Publisher trace context injected: trace_id=%s, span_id=%s, traceparent=%s, exchange=%s, routing_key=%s, message_id=%s",
+				spanCtx.TraceID().String(), spanCtx.SpanID().String(), traceparent, exchange, routingKey, publishing.MessageId)
+		}
+	}
+
 	if options.Priority > 0 {
 		publishing.Priority = options.Priority
 	}
 	if options.Expiration != "" {
 		publishing.Expiration = options.Expiration
-	}
-	if options.MessageID != "" {
-		publishing.MessageId = options.MessageID
 	}
 	if !options.Timestamp.IsZero() {
 		publishing.Timestamp = options.Timestamp
@@ -254,15 +272,51 @@ func (r *rabbitmqClient) ConsumeWithOptions(ctx context.Context, queue string, h
 		r.logger.Infof("Started consuming messages from RabbitMQ: queue=%s, consumer=%s", queue, consumer)
 	}
 
-	// Process messages in a goroutine
 	go func() {
 		for delivery := range deliveries {
-			// Extract tracing context from message headers for distributed tracing
+			// Extract publisher trace context from message headers for SpanLink
+			// Consumer creates a NEW trace (not continuing publisher trace)
+			// Publisher and Consumer traces are linked via SpanLink (async messaging pattern)
 			carrier := &models.AMQPCarrier{Headers: delivery.Headers}
-			parentCtx := r.propagator.Extract(context.Background(), carrier)
+			publisherCtx := r.propagator.Extract(context.Background(), carrier)
 
-			// Create a new span as a child of the extracted context
-			deliveryCtx, deliverySpan := r.trace(parentCtx, "handle_message")
+			// Extract publisher span context for SpanLink
+			var publisherSpanCtx trace.SpanContext
+			if spanCtx := trace.SpanContextFromContext(publisherCtx); spanCtx.IsValid() {
+				publisherSpanCtx = spanCtx
+			}
+
+			// Create a NEW trace for consumer (not continuing publisher trace)
+			// Start with context.Background() to create independent trace
+			tracer := r.tracer.Tracer("rabbitmq.consumer")
+
+			// Create span with SpanLink to publisher trace (if available)
+			var spanOptions []trace.SpanStartOption
+			if publisherSpanCtx.IsValid() {
+				// Create SpanLink to publisher trace
+				link := trace.Link{
+					SpanContext: publisherSpanCtx,
+					Attributes: []attribute.KeyValue{
+						attribute.String("messaging.message_id", delivery.MessageId),
+						attribute.String("messaging.routing_key", delivery.RoutingKey),
+						attribute.String("messaging.exchange", delivery.Exchange),
+					},
+				}
+				spanOptions = append(spanOptions, trace.WithLinks(link))
+
+				if r.logger != nil {
+					r.logger.Debugf("Consumer trace linked to publisher: publisher_trace_id=%s, publisher_span_id=%s, message_id=%s, queue=%s",
+						publisherSpanCtx.TraceID().String(), publisherSpanCtx.SpanID().String(), delivery.MessageId, queue)
+				}
+			} else {
+				if r.logger != nil {
+					r.logger.Debugf("Consumer trace created without link (no publisher trace context): message_id=%s, queue=%s",
+						delivery.MessageId, queue)
+				}
+			}
+
+			// Create new trace for consumer (independent from publisher)
+			deliveryCtx, deliverySpan := tracer.Start(context.Background(), "rabbitmq.handle_message", spanOptions...)
 			deliverySpan.SetAttributes(
 				attribute.String("rabbitmq.queue", queue),
 				attribute.String("rabbitmq.message_id", delivery.MessageId),
