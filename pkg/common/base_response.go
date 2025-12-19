@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// ResponseCode represents standard response codes as integers
 type ResponseCode int
 
 const (
@@ -37,7 +38,7 @@ type BaseResponse struct {
 	Message string `json:"message" example:"Thao tác thành công"`
 
 	// @Description Dữ liệu trả về
-	Data any `json:"data,omitempty"`
+	Data interface{} `json:"data,omitempty"`
 
 	// @Description Thông tin phân trang (nếu có)
 	Pagination *PaginationInfo `json:"pagination,omitempty"`
@@ -119,7 +120,7 @@ type ErrorResponse struct {
 }
 
 // SuccessResponse creates a success response
-func SuccessResponse(data any, message string) BaseResponse {
+func SuccessResponse(data interface{}, message string) BaseResponse {
 	return BaseResponse{
 		Code:      SUCCESS,
 		Message:   message,
@@ -129,7 +130,7 @@ func SuccessResponse(data any, message string) BaseResponse {
 }
 
 // SuccessResponseI18n creates a success response with i18n message
-func SuccessResponseI18n(data any, messageKey string) BaseResponse {
+func SuccessResponseI18n(data interface{}, messageKey string) BaseResponse {
 	return BaseResponse{
 		Code:      SUCCESS,
 		Message:   T(messageKey),
@@ -139,7 +140,7 @@ func SuccessResponseI18n(data any, messageKey string) BaseResponse {
 }
 
 // SuccessResponseWithContext creates a success response with context-based i18n
-func SuccessResponseWithContext(ctx context.Context, data any, messageKey string) BaseResponse {
+func SuccessResponseWithContext(ctx context.Context, data interface{}, messageKey string) BaseResponse {
 	return BaseResponse{
 		Code:      SUCCESS,
 		Message:   TWithContext(ctx, messageKey),
@@ -149,7 +150,7 @@ func SuccessResponseWithContext(ctx context.Context, data any, messageKey string
 }
 
 // SuccessResponseWithPagination creates a success response with pagination
-func SuccessResponseWithPagination(data any, message string, pagination PaginationInfo) BaseResponse {
+func SuccessResponseWithPagination(data interface{}, message string, pagination PaginationInfo) BaseResponse {
 	return BaseResponse{
 		Code:       SUCCESS,
 		Message:    message,
@@ -159,7 +160,7 @@ func SuccessResponseWithPagination(data any, message string, pagination Paginati
 }
 
 // SuccessResponseWithPaginationI18n creates a success response with pagination and i18n message
-func SuccessResponseWithPaginationI18n(data any, messageKey string, pagination PaginationInfo) BaseResponse {
+func SuccessResponseWithPaginationI18n(data interface{}, messageKey string, pagination PaginationInfo) BaseResponse {
 	return BaseResponse{
 		Code:       SUCCESS,
 		Message:    T(messageKey),
