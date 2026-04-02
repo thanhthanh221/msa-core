@@ -1,14 +1,16 @@
 package services
 
 import (
+	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/thanhthanh221/msa-core/pkg/infrastructure/redis"
 	"github.com/thanhthanh221/msa-core/pkg/models"
 )
 
+// JWTService issues and validates JWT access/refresh tokens.
 type JWTService interface {
 	GenerateToken(user models.OAuthUser, scopes []string, issuer string, expiresIn time.Duration) (string, error)
 	ValidateToken(tokenString string) (*models.JWTClaims, error)
@@ -22,11 +24,17 @@ type JWTService interface {
 
 type jwtService struct {
 	secretKey []byte
+	redis     redis.RedisClient
 }
 
-func NewJWTService(secretKey string) JWTService {
+const redisBlacklistKeyPrefix = "blacklist:token:"
+
+func blacklistRedisKey(token string) string { return redisBlacklistKeyPrefix + token }
+
+func NewJWTService(secretKey string, redisClient redis.RedisClient) JWTService {
 	return &jwtService{
 		secretKey: []byte(secretKey),
+		redis:     redisClient,
 	}
 }
 
@@ -44,12 +52,15 @@ func (s *jwtService) GenerateToken(user models.OAuthUser, scopes []string, issue
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(s.secretKey)
+	signed, err := token.SignedString(s.secretKey)
+	if err != nil {
+		return "", err
+	}
+	return signed, nil
 }
 
 func (s *jwtService) ValidateToken(tokenString string) (*models.JWTClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &models.JWTClaims{}, func(token *jwt.Token) (any, error) {
-		// Verify signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
@@ -65,7 +76,6 @@ func (s *jwtService) ValidateToken(tokenString string) (*models.JWTClaims, error
 		return nil, errors.New("invalid token claims")
 	}
 
-	// Check if token is expired
 	if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(time.Now()) {
 		return nil, errors.New("token expired")
 	}
@@ -78,13 +88,10 @@ func (s *jwtService) RefreshToken(tokenString string, expiresIn time.Duration) (
 	if err != nil {
 		return "", err
 	}
-
-	// Generate new token with same user info but new expiry
 	return s.GenerateToken(claims.User, claims.Scopes, claims.Issuer, expiresIn)
 }
 
 func (s *jwtService) ExtractUser(tokenString string) (*models.OAuthUser, error) {
-	// Parse token without validation to extract claims
 	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, &models.JWTClaims{})
 	if err != nil {
 		return nil, err
@@ -92,7 +99,7 @@ func (s *jwtService) ExtractUser(tokenString string) (*models.OAuthUser, error) 
 
 	claims, ok := token.Claims.(*models.JWTClaims)
 	if !ok {
-		return nil, errors.New("invalid token claims")
+		return nil, err
 	}
 
 	return &claims.User, nil
@@ -102,8 +109,16 @@ func (s *jwtService) BlacklistToken(tokenString string, expiry time.Duration) er
 	if tokenString == "" {
 		return errors.New("empty token")
 	}
-	expiresAt := time.Now().Add(expiry)
-	blacklistedTokens.Store(tokenString, expiresAt)
+	if s.redis == nil {
+		return errors.New("redis client required for blacklist")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := s.redis.Set(ctx, blacklistRedisKey(tokenString), "1", expiry); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -111,34 +126,34 @@ func (s *jwtService) IsTokenBlacklisted(tokenString string) (bool, error) {
 	if tokenString == "" {
 		return false, nil
 	}
-	if v, ok := blacklistedTokens.Load(tokenString); ok {
-		if exp, ok2 := v.(time.Time); ok2 {
-			if time.Now().Before(exp) {
-				return true, nil
-			}
-			// expired - cleanup
-			blacklistedTokens.Delete(tokenString)
-		} else {
-			// corrupted entry - cleanup
-			blacklistedTokens.Delete(tokenString)
-		}
+	if s.redis == nil {
+		return false, errors.New("redis client required for blacklist check")
 	}
-	return false, nil
-}
 
-// in-memory blacklist storage with TTL (token -> expiresAt)
-var blacklistedTokens sync.Map
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	exists, err := s.redis.Exists(ctx, blacklistRedisKey(tokenString))
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
 
 func (s *jwtService) GenerateRefreshToken(user models.OAuthUser) (string, error) {
 	claims := jwt.MapClaims{
 		"user_id": user.ID,
 		"type":    "refresh",
-		"exp":     time.Now().Add(30 * 24 * time.Hour).Unix(), // 30 days
+		"exp":     time.Now().Add(30 * 24 * time.Hour).Unix(),
 		"iat":     time.Now().Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(s.secretKey)
+	signed, err := token.SignedString(s.secretKey)
+	if err != nil {
+		return "", err
+	}
+	return signed, nil
 }
 
 func (s *jwtService) ValidateRefreshToken(tokenString string) (string, error) {
@@ -152,17 +167,16 @@ func (s *jwtService) ValidateRefreshToken(tokenString string) (string, error) {
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok || !token.Valid {
-		return "", errors.New("invalid refresh token")
+		return "", err
 	}
 
-	// Check token type
 	if claims["type"] != "refresh" {
-		return "", errors.New("invalid token type")
+		return "", err
 	}
 
 	userID, ok := claims["user_id"].(string)
 	if !ok {
-		return "", errors.New("invalid user ID in refresh token")
+		return "", err
 	}
 
 	return userID, nil

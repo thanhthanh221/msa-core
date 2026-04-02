@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/sirupsen/logrus"
 	"github.com/thanhthanh221/msa-core/pkg/common"
+	"github.com/thanhthanh221/msa-core/pkg/infrastructure/redis"
 	"github.com/thanhthanh221/msa-core/pkg/models"
 	services "github.com/thanhthanh221/msa-core/pkg/service"
 )
@@ -19,10 +20,10 @@ type JWTAuthMiddleware struct {
 }
 
 // NewJWTAuthMiddleware creates a new JWT auth middleware
-func NewJWTAuthMiddleware(secretKey string, logger *logrus.Logger) *JWTAuthMiddleware {
+func NewJWTAuthMiddleware(secretKey string, redisClient redis.RedisClient, logger *logrus.Logger) *JWTAuthMiddleware {
 	return &JWTAuthMiddleware{
 		logger:     logger,
-		jwtService: services.NewJWTService(secretKey),
+		jwtService: services.NewJWTService(secretKey, redisClient),
 	}
 }
 
@@ -62,7 +63,7 @@ func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 				m.logger.Warn("Invalid JWT token: ", err)
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"error":             "invalid_token",
-					"error_description": "Invalid or expired token",
+					"error_description": err.Error(),
 				})
 			}
 
@@ -117,7 +118,7 @@ func (m *JWTAuthMiddleware) RequireScope(requiredScope string) echo.MiddlewareFu
 					m.logger.Warn("Invalid JWT token: ", err)
 					return c.JSON(http.StatusUnauthorized, map[string]string{
 						"error":             "invalid_token",
-						"error_description": "Invalid or expired token",
+						"error_description": err.Error(),
 					})
 				}
 
@@ -191,7 +192,7 @@ func (m *JWTAuthMiddleware) RequireRole(requiredRole string) echo.MiddlewareFunc
 					m.logger.Warn("Invalid JWT token: ", err)
 					return c.JSON(http.StatusUnauthorized, map[string]string{
 						"error":             "invalid_token",
-						"error_description": "Invalid or expired token",
+						"error_description": err.Error(),
 					})
 				}
 
