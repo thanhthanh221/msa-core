@@ -20,6 +20,9 @@ type OAuthUser struct {
 	// @Description User provider
 	// @example "msa"
 	Provider string `json:"provider" example:"msa"`
+	// @Description User roles
+	// @example ["admin","editor"]
+	Roles []string `json:"roles,omitempty" example:"[\"admin\",\"editor\"]"`
 }
 
 // JWTClaims represents JWT token claims (non-DB)
@@ -31,6 +34,9 @@ type JWTClaims struct {
 	// @Description Scopes
 	// @example ["read", "write"]
 	Scopes []string `json:"scopes" example:"[\"read\", \"write\"]"`
+	// @Description Security stamp
+	// @example "1234567890"
+	SecurityStamp string `json:"security_stamp" example:"1234567890"`
 	// @Description Registered claims
 	// @example "RegisteredClaims"
 	jwt.RegisteredClaims

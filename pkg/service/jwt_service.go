@@ -10,7 +10,7 @@ import (
 )
 
 type JWTService interface {
-	GenerateToken(user models.OAuthUser, scopes []string, expiresIn time.Duration) (string, error)
+	GenerateToken(user models.OAuthUser, scopes []string, issuer string, expiresIn time.Duration) (string, error)
 	ValidateToken(tokenString string) (*models.JWTClaims, error)
 	RefreshToken(tokenString string, expiresIn time.Duration) (string, error)
 	ExtractUser(tokenString string) (*models.OAuthUser, error)
@@ -30,7 +30,7 @@ func NewJWTService(secretKey string) JWTService {
 	}
 }
 
-func (s *jwtService) GenerateToken(user models.OAuthUser, scopes []string, expiresIn time.Duration) (string, error) {
+func (s *jwtService) GenerateToken(user models.OAuthUser, scopes []string, issuer string, expiresIn time.Duration) (string, error) {
 	claims := models.JWTClaims{
 		User:   user,
 		Scopes: scopes,
@@ -38,7 +38,7 @@ func (s *jwtService) GenerateToken(user models.OAuthUser, scopes []string, expir
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiresIn)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
-			Issuer:    "msa-backend",
+			Issuer:    issuer,
 			Subject:   user.ID,
 		},
 	}
@@ -80,7 +80,7 @@ func (s *jwtService) RefreshToken(tokenString string, expiresIn time.Duration) (
 	}
 
 	// Generate new token with same user info but new expiry
-	return s.GenerateToken(claims.User, claims.Scopes, expiresIn)
+	return s.GenerateToken(claims.User, claims.Scopes, claims.Issuer, expiresIn)
 }
 
 func (s *jwtService) ExtractUser(tokenString string) (*models.OAuthUser, error) {

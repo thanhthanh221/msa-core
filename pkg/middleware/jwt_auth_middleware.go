@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/sirupsen/logrus"
 	"github.com/thanhthanh221/msa-core/pkg/common"
+	"github.com/thanhthanh221/msa-core/pkg/models"
 	services "github.com/thanhthanh221/msa-core/pkg/service"
 )
 
@@ -84,13 +85,51 @@ func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 func (m *JWTAuthMiddleware) RequireScope(requiredScope string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Get scopes from context (set by RequireAuth)
+			// Prefer scopes already set by RequireAuth (if present)
 			scopes, ok := c.Get("scopes").([]string)
-			if !ok {
-				return c.JSON(http.StatusForbidden, map[string]string{
-					"error":             "missing_scopes",
-					"error_description": "No scopes found in token",
-				})
+			if !ok || len(scopes) == 0 {
+				// Otherwise, validate token directly to make RequireScope independent
+				authHeader := c.Request().Header.Get("Authorization")
+				if authHeader == "" {
+					return c.JSON(http.StatusUnauthorized, map[string]string{
+						"error":             "missing_authorization_header",
+						"error_description": "Authorization header is required",
+					})
+				}
+
+				if !strings.HasPrefix(authHeader, "Bearer ") {
+					return c.JSON(http.StatusUnauthorized, map[string]string{
+						"error":             "invalid_authorization_header",
+						"error_description": "Authorization header must start with 'Bearer '",
+					})
+				}
+
+				token := strings.TrimPrefix(authHeader, "Bearer ")
+				if token == "" {
+					return c.JSON(http.StatusUnauthorized, map[string]string{
+						"error":             "missing_token",
+						"error_description": "Token is required",
+					})
+				}
+
+				claims, err := m.jwtService.ValidateToken(token)
+				if err != nil {
+					m.logger.Warn("Invalid JWT token: ", err)
+					return c.JSON(http.StatusUnauthorized, map[string]string{
+						"error":             "invalid_token",
+						"error_description": "Invalid or expired token",
+					})
+				}
+
+				scopes = claims.Scopes
+				c.Set("user", &claims.User)
+				c.Set("scopes", claims.Scopes)
+				c.Set("claims", claims)
+				c.Set("user_id", claims.User.ID)
+
+				req := c.Request()
+				goCtx := common.WithUserID(req.Context(), claims.User.ID)
+				c.SetRequest(req.WithContext(goCtx))
 			}
 
 			// Check if required scope is present
@@ -100,6 +139,86 @@ func (m *JWTAuthMiddleware) RequireScope(requiredScope string) echo.MiddlewareFu
 				return c.JSON(http.StatusForbidden, map[string]string{
 					"error":             "insufficient_scope",
 					"error_description": "Insufficient scope. Required: " + requiredScope,
+				})
+			}
+
+			return next(c)
+		}
+	}
+}
+
+// RequireRole middleware that checks if user has required role
+func (m *JWTAuthMiddleware) RequireRole(requiredRole string) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			// Prefer roles already set by RequireAuth / RequireScope (if present)
+			roles, ok := c.Get("roles").([]string)
+			if !ok || len(roles) == 0 {
+				// Fallback to roles from user in context
+				if u, ok := c.Get("user").(*models.OAuthUser); ok && u != nil && len(u.Roles) > 0 {
+					roles = u.Roles
+					c.Set("roles", roles)
+				}
+			}
+
+			if len(roles) == 0 {
+				// Otherwise, validate token directly to make RequireRole independent
+				authHeader := c.Request().Header.Get("Authorization")
+				if authHeader == "" {
+					return c.JSON(http.StatusUnauthorized, map[string]string{
+						"error":             "missing_authorization_header",
+						"error_description": "Authorization header is required",
+					})
+				}
+
+				if !strings.HasPrefix(authHeader, "Bearer ") {
+					return c.JSON(http.StatusUnauthorized, map[string]string{
+						"error":             "invalid_authorization_header",
+						"error_description": "Authorization header must start with 'Bearer '",
+					})
+				}
+
+				token := strings.TrimPrefix(authHeader, "Bearer ")
+				if token == "" {
+					return c.JSON(http.StatusUnauthorized, map[string]string{
+						"error":             "missing_token",
+						"error_description": "Token is required",
+					})
+				}
+
+				claims, err := m.jwtService.ValidateToken(token)
+				if err != nil {
+					m.logger.Warn("Invalid JWT token: ", err)
+					return c.JSON(http.StatusUnauthorized, map[string]string{
+						"error":             "invalid_token",
+						"error_description": "Invalid or expired token",
+					})
+				}
+
+				roles = claims.User.Roles
+
+				c.Set("user", &claims.User)
+				c.Set("scopes", claims.Scopes)
+				c.Set("claims", claims)
+				c.Set("user_id", claims.User.ID)
+				c.Set("roles", roles)
+
+				req := c.Request()
+				goCtx := common.WithUserID(req.Context(), claims.User.ID)
+				c.SetRequest(req.WithContext(goCtx))
+			}
+
+			if len(roles) == 0 {
+				return c.JSON(http.StatusForbidden, map[string]string{
+					"error":             "missing_role",
+					"error_description": "No role found in token",
+				})
+			}
+
+			if !slices.Contains(roles, requiredRole) {
+				return c.JSON(http.StatusForbidden, map[string]string{
+					"error":             "insufficient_role",
+					"error_description": "Insufficient role. Required: " + requiredRole,
 				})
 			}
 
