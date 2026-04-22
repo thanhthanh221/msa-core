@@ -37,6 +37,9 @@ type JWTClaims struct {
 	// @Description Security stamp
 	// @example "1234567890"
 	SecurityStamp string `json:"security_stamp" example:"1234567890"`
+	// @Description Session ID (links access token to refresh/session)
+	// @example "c1c0b6b8-2b31-4b2f-9d6f-9c6a3a2e3d65"
+	SID string `json:"sid" example:"c1c0b6b8-2b31-4b2f-9d6f-9c6a3a2e3d65"`
 	// @Description Registered claims
 	// @example "RegisteredClaims"
 	jwt.RegisteredClaims
