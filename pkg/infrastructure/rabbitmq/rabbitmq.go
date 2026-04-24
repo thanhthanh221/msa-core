@@ -83,7 +83,9 @@ type ConsumeOptions struct {
 	NoWait    bool
 	Args      amqp091.Table
 	// Retry configuration
-	MaxRetries int // Maximum number of retries before sending to DLQ (0 = disabled, requeue on failure)
+	// MaxRetries: max failed processing attempts before Nack(requeue=false) → DLX/DLQ.
+	// Retries are tracked via x-retry-count on republished copies (Nack(requeue=true) does not hit DLX, so x-death never increments).
+	MaxRetries int // 0 = disabled: on failure always Nack(requeue=true) until success or operator intervention
 }
 
 // QueueOptions contains options for declaring a queue with DLX support
@@ -725,6 +727,7 @@ func (r *rabbitmqClient) ConsumeWithOptions(ctx context.Context, queue string, h
 					if !options.AutoAck {
 						// Handle retry logic if MaxRetries is configured
 						shouldRequeue := true
+						retryRepublished := false
 						if options.MaxRetries > 0 {
 							retryCount := r.getRetryCount(delivery)
 							deliverySpan.SetAttributes(attribute.Int("rabbitmq.retry_count", retryCount))
@@ -741,27 +744,59 @@ func (r *rabbitmqClient) ConsumeWithOptions(ctx context.Context, queue string, h
 									attribute.Int("rabbitmq.max_retries_exceeded", retryCount),
 								)
 							} else {
-								// Increment retry count and requeue
+								// Republish with incremented x-retry-count then Ack the original.
+								// Nack(requeue=true) never dead-letters, so x-death-based counting would stay at 0 forever.
+								next := retryCount + 1
 								if r.logger != nil {
 									r.logger.Warnf("Message will be retried: queue=%s, message_id=%s, retry_count=%d/%d",
-										queue, delivery.MessageId, retryCount+1, options.MaxRetries)
+										queue, delivery.MessageId, next, options.MaxRetries)
 								}
-								deliverySpan.SetAttributes(attribute.Int("rabbitmq.will_retry", retryCount+1))
+								deliverySpan.SetAttributes(attribute.Int("rabbitmq.will_retry", next))
+
+								pubOpts := PublishOptions{
+									ContentType: delivery.ContentType,
+									MessageID:   delivery.MessageId,
+									Headers:     cloneHeadersWithRetryCount(delivery.Headers, next),
+									Priority:    delivery.Priority,
+									Expiration:  delivery.Expiration,
+								}
+								exchange := delivery.Exchange
+								routingKey := delivery.RoutingKey
+								if routingKey == "" {
+									routingKey = queue
+								}
+								pubErr := r.PublishWithOptions(deliveryCtx, exchange, routingKey, delivery.Body, pubOpts)
+								if pubErr != nil {
+									deliverySpan.RecordError(pubErr)
+									if r.logger != nil {
+										r.logger.Errorf("Failed to republish message for retry: queue=%s, message_id=%s, error=%s", queue, delivery.MessageId, pubErr.Error())
+									}
+									if err := delivery.Nack(false, false); err != nil && r.logger != nil {
+										r.logger.Errorf("Failed to nack message (no requeue): error=%s", err.Error())
+									}
+								} else {
+									if err := delivery.Ack(false); err != nil && r.logger != nil {
+										r.logger.Errorf("Failed to ack message after republish: error=%s", err.Error())
+									}
+								}
+								retryRepublished = true
 							}
 						}
 
-						if shouldRequeue {
-							// Requeue message (will be retried)
-							if err := delivery.Nack(false, true); err != nil {
-								if r.logger != nil {
-									r.logger.Errorf("Failed to nack message: error=%s", err.Error())
+						if !retryRepublished {
+							if shouldRequeue {
+								// Requeue message (will be retried; MaxRetries disabled)
+								if err := delivery.Nack(false, true); err != nil {
+									if r.logger != nil {
+										r.logger.Errorf("Failed to nack message: error=%s", err.Error())
+									}
 								}
-							}
-						} else {
-							// Reject without requeue (will be sent to DLQ if configured)
-							if err := delivery.Nack(false, false); err != nil {
-								if r.logger != nil {
-									r.logger.Errorf("Failed to nack message (no requeue): error=%s", err.Error())
+							} else {
+								// Reject without requeue (will be sent to DLQ if configured)
+								if err := delivery.Nack(false, false); err != nil {
+									if r.logger != nil {
+										r.logger.Errorf("Failed to nack message (no requeue): error=%s", err.Error())
+									}
 								}
 							}
 						}
@@ -1307,6 +1342,18 @@ func (r *rabbitmqClient) SetupDLXForQueue(ctx context.Context, queueName, dlxNam
 	return nil
 }
 
+// cloneHeadersWithRetryCount returns a copy of headers with x-retry-count set and x-death removed
+// so republished retries do not mix DLX metadata with the explicit counter.
+func cloneHeadersWithRetryCount(headers amqp091.Table, retryCount int) amqp091.Table {
+	h := maps.Clone(headers)
+	if h == nil {
+		h = amqp091.Table{}
+	}
+	delete(h, "x-death")
+	h["x-retry-count"] = int32(retryCount)
+	return h
+}
+
 // getRetryCount extracts retry count from message headers
 // Returns 0 if not found or invalid
 func (r *rabbitmqClient) getRetryCount(delivery amqp091.Delivery) int {
@@ -1328,8 +1375,8 @@ func (r *rabbitmqClient) getRetryCount(delivery amqp091.Delivery) int {
 		}
 	}
 
-	// Also check x-death header (RabbitMQ's built-in retry tracking)
-	// x-death is an array of death records, length indicates retry count
+	// Also check x-death (only present after dead-lettering). Not updated on Nack(requeue=true).
+	// Length is a rough hint; prefer x-retry-count for bounded retries in this client.
 	if xDeath, ok := delivery.Headers["x-death"]; ok {
 		if deaths, ok := xDeath.([]interface{}); ok {
 			return len(deaths)
