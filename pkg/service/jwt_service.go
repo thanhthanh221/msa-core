@@ -19,7 +19,7 @@ type JWTService interface {
 	RefreshToken(tokenString string, expiresIn time.Duration) (string, error)
 
 	ValidateToken(tokenString string) (*models.JWTClaims, error)
-	ValidateRefreshToken(tokenString string) (string, error)
+	ValidateRefreshToken(tokenString string) (userID string, sid string, err error)
 }
 
 type jwtService struct {
@@ -138,32 +138,38 @@ func (s *jwtService) RefreshToken(tokenString string, expiresIn time.Duration) (
 	return s.GenerateToken(claims.User, claims.Scopes, claims.Issuer, claims.SID, expiresIn)
 }
 
-func (s *jwtService) ValidateRefreshToken(tokenString string) (string, error) {
+func (s *jwtService) ValidateRefreshToken(tokenString string) (string, string, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return s.secretKey, nil
 	})
 
 	if err != nil {
 		fmt.Println("error parsing refresh token", err)
-		return "", err
+		return "", "", err
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok || !token.Valid {
 		fmt.Println("invalid refresh token")
-		return "", err
+		return "", "", errors.New("invalid refresh token")
 	}
 
 	if claims["typ"] != "refresh" {
 		fmt.Println("invalid refresh token type")
-		return "", err
+		return "", "", errors.New("invalid refresh token type")
 	}
 
 	userID, ok := claims["sub"].(string)
 	if !ok {
 		fmt.Println("invalid refresh token claims")
-		return "", err
+		return "", "", errors.New("invalid refresh token claims")
 	}
 
-	return userID, nil
+	sid, _ := claims["sid"].(string)
+	if sid == "" {
+		fmt.Println("missing session id in refresh token")
+		return "", "", errors.New("missing session id")
+	}
+
+	return userID, sid, nil
 }

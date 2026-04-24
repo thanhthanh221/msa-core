@@ -72,9 +72,11 @@ func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 			c.Set("scopes", claims.Scopes)
 			c.Set("claims", claims)
 			c.Set("user_id", claims.User.ID)
+			c.Set("sid", claims.SID)
 
 			req := c.Request()
 			goCtx := common.WithUserID(req.Context(), claims.User.ID)
+			goCtx = common.WithSID(goCtx, claims.SID)
 			c.SetRequest(req.WithContext(goCtx))
 
 			return next(c)
@@ -127,9 +129,11 @@ func (m *JWTAuthMiddleware) RequireScope(requiredScope string) echo.MiddlewareFu
 				c.Set("scopes", claims.Scopes)
 				c.Set("claims", claims)
 				c.Set("user_id", claims.User.ID)
+				c.Set("sid", claims.SID)
 
 				req := c.Request()
 				goCtx := common.WithUserID(req.Context(), claims.User.ID)
+				goCtx = common.WithSID(goCtx, claims.SID)
 				c.SetRequest(req.WithContext(goCtx))
 			}
 
@@ -202,10 +206,12 @@ func (m *JWTAuthMiddleware) RequireRole(requiredRole string) echo.MiddlewareFunc
 				c.Set("scopes", claims.Scopes)
 				c.Set("claims", claims)
 				c.Set("user_id", claims.User.ID)
+				c.Set("sid", claims.SID)
 				c.Set("roles", roles)
 
 				req := c.Request()
 				goCtx := common.WithUserID(req.Context(), claims.User.ID)
+				goCtx = common.WithSID(goCtx, claims.SID)
 				c.SetRequest(req.WithContext(goCtx))
 			}
 
