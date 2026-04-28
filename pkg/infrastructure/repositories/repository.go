@@ -28,8 +28,8 @@ func NewGormRepository(db *gorm.DB, logger *log.Logger, tracer trace.TracerProvi
 	}
 }
 
-func (r *gormRepository) DB() *gorm.DB {
-	return r.DBWithPreloads(nil)
+func (r *gormRepository) DB(ctx context.Context) *gorm.DB {
+	return r.DBWithPreloads(ctx, nil)
 }
 
 func (r *gormRepository) GetAll(ctx context.Context, target interface{}, preloads ...string) error {
@@ -38,7 +38,7 @@ func (r *gormRepository) GetAll(ctx context.Context, target interface{}, preload
 		defer span.End()
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		Unscoped().
 		Find(target)
 
@@ -51,7 +51,7 @@ func (r *gormRepository) GetBatch(ctx context.Context, target interface{}, limit
 		defer span.End()
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		Unscoped().
 		Limit(limit).
 		Offset(offset).
@@ -73,7 +73,7 @@ func (r *gormRepository) GetWhere(ctx context.Context, target interface{}, condi
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where(condition).
 		Order("created_at DESC").
@@ -96,7 +96,7 @@ func (r *gormRepository) GetWhereWithArgs(ctx context.Context, target interface{
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where(condition, args...).
 		Order("created_at DESC").
@@ -118,7 +118,7 @@ func (r *gormRepository) GetWherePagging(ctx context.Context, target interface{}
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where(condition).
 		Limit(limit).
@@ -142,7 +142,7 @@ func (r *gormRepository) GetWhereBatch(ctx context.Context, target interface{}, 
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where(condition).
 		Limit(limit).
@@ -167,7 +167,7 @@ func (r *gormRepository) GetByField(ctx context.Context, target interface{}, fie
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where(fmt.Sprintf("%v = ?", field), value).
 		Order("created_at DESC").
@@ -189,7 +189,7 @@ func (r *gormRepository) GetByFields(ctx context.Context, target interface{}, fi
 		)
 	}
 
-	db := r.DBWithPreloads(preloads).WithContext(ctx)
+	db := r.DBWithPreloads(ctx, preloads).WithContext(ctx)
 	for field, value := range filters {
 		db = db.Where(fmt.Sprintf("%v = ?", field), value)
 	}
@@ -215,7 +215,7 @@ func (r *gormRepository) GetByFieldBatch(ctx context.Context, target interface{}
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where(fmt.Sprintf("%v = ?", field), value).
 		Limit(limit).
@@ -239,7 +239,7 @@ func (r *gormRepository) GetByFieldsBatch(ctx context.Context, target interface{
 		)
 	}
 
-	db := r.DBWithPreloads(preloads)
+	db := r.DBWithPreloads(ctx, preloads)
 	for field, value := range filters {
 		db = db.Where(fmt.Sprintf("%v = ?", field), value)
 	}
@@ -267,7 +267,7 @@ func (r *gormRepository) GetOneByField(ctx context.Context, target interface{}, 
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where(fmt.Sprintf("%v = ?", field), value).
 		Order("created_at DESC").
@@ -289,7 +289,7 @@ func (r *gormRepository) GetOneByFields(ctx context.Context, target interface{},
 		)
 	}
 
-	db := r.DBWithPreloads(preloads).WithContext(ctx)
+	db := r.DBWithPreloads(ctx, preloads).WithContext(ctx)
 	for field, value := range filters {
 		db = db.Where(fmt.Sprintf("%v = ?", field), value)
 	}
@@ -311,7 +311,7 @@ func (r *gormRepository) GetOneByID(ctx context.Context, target interface{}, id 
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where("id = ?", id).
 		Order("created_at DESC").
@@ -332,7 +332,7 @@ func (r *gormRepository) Create(ctx context.Context, target interface{}) error {
 		)
 	}
 
-	res := r.db.WithContext(ctx).Create(target)
+	res := r.DB(ctx).Create(target)
 	return r.HandleError(ctx, res, span)
 }
 
@@ -585,8 +585,8 @@ func (r *gormRepository) HandleOneError(ctx context.Context, res *gorm.DB, span 
 	return nil
 }
 
-func (r *gormRepository) DBWithPreloads(preloads []string) *gorm.DB {
-	dbConn := r.db
+func (r *gormRepository) DBWithPreloads(ctx context.Context, preloads []string) *gorm.DB {
+	dbConn := r.db.WithContext(ctx)
 
 	for _, join := range r.defaultJoins {
 		dbConn = dbConn.Joins(join)
@@ -770,7 +770,7 @@ func (r *gormRepository) GetWhereWithOrder(ctx context.Context, target interface
 		)
 	}
 
-	res := r.DBWithPreloads(preloads).
+	res := r.DBWithPreloads(ctx, preloads).
 		WithContext(ctx).
 		Where(condition, args...).
 		Order(orderBy).

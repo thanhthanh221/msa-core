@@ -41,8 +41,8 @@ type Repository interface {
 	DeleteWhere(ctx context.Context, target interface{}, condition string, args ...interface{}) error
 	DeleteWhereTx(ctx context.Context, target interface{}, condition string, tx *gorm.DB, args ...interface{}) error
 
-	DB() *gorm.DB
-	DBWithPreloads(preloads []string) *gorm.DB
+	DB(ctx context.Context) *gorm.DB
+	DBWithPreloads(ctx context.Context, preloads []string) *gorm.DB
 	HandleError(ctx context.Context, res *gorm.DB, span trace.Span) error
 	HandleOneError(ctx context.Context, res *gorm.DB, span trace.Span) error
 
