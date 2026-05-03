@@ -29,6 +29,12 @@ func NewGormRepository(db *gorm.DB, logger *log.Logger, tracer trace.TracerProvi
 }
 
 func (r *gormRepository) DB(ctx context.Context) *gorm.DB {
+	ctx, span := r.trace(ctx, "repository.db")
+
+	if span != nil {
+		defer span.End()
+	}
+
 	return r.DBWithPreloads(ctx, nil)
 }
 
