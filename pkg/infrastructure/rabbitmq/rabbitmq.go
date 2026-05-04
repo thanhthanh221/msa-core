@@ -76,12 +76,14 @@ type PublishOptions struct {
 
 // ConsumeOptions contains options for consuming messages
 type ConsumeOptions struct {
-	Consumer  string
-	AutoAck   bool
-	Exclusive bool
-	NoLocal   bool
-	NoWait    bool
-	Args      amqp091.Table
+	Consumer       string
+	AutoAck        bool
+	Exclusive      bool
+	NoLocal        bool
+	NoWait         bool
+	Args           amqp091.Table
+	PrefetchCount  int  // basic.qos prefetch count
+	PrefetchGlobal bool // if true, qos is applied globally to the channel
 	// Retry configuration
 	// MaxRetries: max failed processing attempts before Nack(requeue=false) → DLX/DLQ.
 	// Retries are tracked via x-retry-count on republished copies (Nack(requeue=true) does not hit DLX, so x-death never increments).
@@ -94,6 +96,59 @@ type ConsumeOptions struct {
 	// DLQName is used when RetryWithDLXTTL=true and MaxRetries exceeded.
 	// If empty, defaults to "<queue>.dlq".
 	DLQName string
+}
+
+// BindingConfig defines a queue binding to an exchange.
+type BindingConfig struct {
+	Queue      string
+	Exchange   string
+	RoutingKey string
+	NoWait     bool
+	Args       amqp091.Table
+}
+
+// ExchangeConfig defines an exchange declaration.
+type ExchangeConfig struct {
+	Name       string
+	Kind       string
+	Durable    bool
+	AutoDelete bool
+	Internal   bool
+	NoWait     bool
+	Args       amqp091.Table
+}
+
+// QueueConfig defines a queue declaration.
+type QueueConfig struct {
+	Name       string
+	Durable    bool
+	AutoDelete bool
+	Exclusive  bool
+	NoWait     bool
+	Args       amqp091.Table
+}
+
+// RetryPolicy defines how retries should be handled for a topology.
+type RetryPolicy struct {
+	MaxRetries      int
+	RetryWithDLXTTL bool
+	RetryTTL        time.Duration
+	RetryExchange   string
+	RetryQueue      string
+	DLXName         string
+	DLQName         string
+}
+
+// RabbitTopology describes a queue topology with optional DLX/DLQ and retry policy.
+type RabbitTopology struct {
+	Exchange ExchangeConfig
+	Queue    QueueConfig
+	Bindings []BindingConfig
+	DLXName  string
+	DLX      DLXOptions
+	DLQName  string
+	DLQ      DLQOptions
+	Retry    RetryPolicy
 }
 
 // QueueOptions contains options for declaring a queue with DLX support
@@ -159,6 +214,10 @@ type RabbitMQClient interface {
 	Consume(ctx context.Context, queue string, handler MessageHandler) error
 	// ConsumeWithOptions starts consuming messages with custom options
 	ConsumeWithOptions(ctx context.Context, queue string, handler MessageHandler, options ConsumeOptions) error
+	// ConsumeWithTopology ensures topology before consuming from the queue
+	ConsumeWithTopology(ctx context.Context, topology RabbitTopology, handler MessageHandler, options ConsumeOptions) error
+	// EnsureTopology declares exchanges, queues, DLX/DLQ and bindings for the supplied topology
+	EnsureTopology(ctx context.Context, topology RabbitTopology) error
 	// DeclareQueue declares a queue
 	DeclareQueue(ctx context.Context, queue string, durable, autoDelete, exclusive, noWait bool, args amqp091.Table) error
 	// DeclareQueueWithDLX declares a queue with Dead Letter Exchange support
@@ -256,6 +315,111 @@ func SetupRetryTTLTopology(ctx context.Context, client RabbitMQClient, queue str
 	}
 
 	return nil
+}
+
+// EnsureTopology declares exchanges, queues, DLX/DLQ and bindings from topology definition.
+func (r *rabbitmqClient) EnsureTopology(ctx context.Context, topology RabbitTopology) error {
+	if topology.Exchange.Name != "" {
+		kind := topology.Exchange.Kind
+		if kind == "" {
+			kind = "direct"
+		}
+		if err := r.DeclareExchange(ctx, topology.Exchange.Name, kind, topology.Exchange.Durable, topology.Exchange.AutoDelete, topology.Exchange.Internal, topology.Exchange.NoWait, topology.Exchange.Args); err != nil {
+			return err
+		}
+	}
+
+	if topology.Retry.RetryWithDLXTTL {
+		if topology.Retry.RetryTTL <= 0 {
+			topology.Retry.RetryTTL = 10 * time.Second
+		}
+		if topology.Retry.RetryExchange == "" {
+			topology.Retry.RetryExchange = topology.Queue.Name + ".retry.dlx"
+		}
+		if topology.Retry.RetryQueue == "" {
+			topology.Retry.RetryQueue = topology.Queue.Name + ".retry"
+		}
+		if topology.Retry.DLXName == "" {
+			topology.Retry.DLXName = topology.Queue.Name + ".dlx"
+		}
+		if topology.Retry.DLQName == "" {
+			topology.Retry.DLQName = topology.Queue.Name + ".dlq"
+		}
+
+		if err := SetupRetryTTLTopology(ctx, r, topology.Queue.Name, RetryTTLTopologyOptions{
+			Durable:        topology.Queue.Durable,
+			RetryTTL:       topology.Retry.RetryTTL,
+			MaxPriority:    0,
+			AdditionalArgs: topology.Queue.Args,
+			RetryExchange:  topology.Retry.RetryExchange,
+			RetryQueue:     topology.Retry.RetryQueue,
+			DLQName:        topology.Retry.DLQName,
+			DLXName:        topology.Retry.DLXName,
+		}); err != nil {
+			return err
+		}
+	} else {
+		queueOpts := QueueOptions{
+			Durable:        topology.Queue.Durable,
+			AutoDelete:     topology.Queue.AutoDelete,
+			Exclusive:      topology.Queue.Exclusive,
+			NoWait:         topology.Queue.NoWait,
+			DLXName:        topology.DLXName,
+			DLXRoutingKey:  topology.Queue.Name,
+			MaxRetries:     topology.Retry.MaxRetries,
+			MessageTTL:     0,
+			MaxLength:      0,
+			MaxPriority:    0,
+			AdditionalArgs: topology.Queue.Args,
+		}
+		if err := r.DeclareQueueWithDLX(ctx, topology.Queue.Name, queueOpts); err != nil {
+			return err
+		}
+
+		if topology.DLXName != "" {
+			if err := r.DeclareDLX(ctx, topology.DLXName, topology.DLX); err != nil {
+				return err
+			}
+		}
+		if topology.DLQName != "" {
+			if err := r.DeclareDLQ(ctx, topology.DLQName, topology.DLXName, topology.DLQ); err != nil {
+				return err
+			}
+			if err := r.BindQueue(ctx, topology.DLQName, topology.DLQName, topology.DLXName, false, nil); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, binding := range topology.Bindings {
+		queue := binding.Queue
+		if queue == "" {
+			queue = topology.Queue.Name
+		}
+		exchange := binding.Exchange
+		if exchange == "" {
+			exchange = topology.Exchange.Name
+		}
+		if queue == "" || exchange == "" {
+			continue
+		}
+		if err := r.BindQueue(ctx, queue, binding.RoutingKey, exchange, binding.NoWait, binding.Args); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ConsumeWithTopology ensures topology exists before consuming.
+func (r *rabbitmqClient) ConsumeWithTopology(ctx context.Context, topology RabbitTopology, handler MessageHandler, options ConsumeOptions) error {
+	if err := r.EnsureTopology(ctx, topology); err != nil {
+		return err
+	}
+	if topology.Queue.Name == "" {
+		return fmt.Errorf("queue name is required for ConsumeWithTopology")
+	}
+	return r.ConsumeWithOptions(ctx, topology.Queue.Name, handler, options)
 }
 
 // rabbitmqClient implements RabbitMQClient interface
@@ -741,6 +905,14 @@ func (r *rabbitmqClient) ConsumeWithOptions(ctx context.Context, queue string, h
 			if err != nil {
 				time.Sleep(backoff)
 				continue
+			}
+
+			if options.PrefetchCount > 0 {
+				if err := consumeCh.Qos(options.PrefetchCount, 0, options.PrefetchGlobal); err != nil {
+					_ = consumeCh.Close()
+					time.Sleep(backoff)
+					continue
+				}
 			}
 
 			deliveries, err := consumeCh.Consume(
