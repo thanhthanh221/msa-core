@@ -76,79 +76,17 @@ type PublishOptions struct {
 
 // ConsumeOptions contains options for consuming messages
 type ConsumeOptions struct {
-	Consumer       string
-	AutoAck        bool
-	Exclusive      bool
-	NoLocal        bool
-	NoWait         bool
-	Args           amqp091.Table
-	PrefetchCount  int  // basic.qos prefetch count
-	PrefetchGlobal bool // if true, qos is applied globally to the channel
+	Consumer  string
+	AutoAck   bool
+	Exclusive bool
+	NoLocal   bool
+	NoWait    bool
+	Args      amqp091.Table
 	// Retry configuration
-	// MaxRetries: max failed processing attempts before Nack(requeue=false) → DLX/DLQ.
-	// Retries are tracked via x-retry-count on republished copies (Nack(requeue=true) does not hit DLX, so x-death never increments).
-	MaxRetries int // 0 = disabled: on failure always Nack(requeue=true) until success or operator intervention
-	// RetryWithDLXTTL enables the "retry queue + TTL + DLX back" pattern.
-	// When enabled and MaxRetries > 0:
-	// - on handler error and retry not exceeded: Nack(requeue=false) so RabbitMQ dead-letters to the configured retry queue (x-death will increment)
-	// - when retry exceeded: publish to DLQ (DLQName or "<queue>.dlq") and Ack original
-	RetryWithDLXTTL bool
-	// DLQName is used when RetryWithDLXTTL=true and MaxRetries exceeded.
-	// If empty, defaults to "<queue>.dlq".
-	DLQName string
-}
-
-// BindingConfig defines a queue binding to an exchange.
-type BindingConfig struct {
-	Queue      string
-	Exchange   string
-	RoutingKey string
-	NoWait     bool
-	Args       amqp091.Table
-}
-
-// ExchangeConfig defines an exchange declaration.
-type ExchangeConfig struct {
-	Name       string
-	Kind       string
-	Durable    bool
-	AutoDelete bool
-	Internal   bool
-	NoWait     bool
-	Args       amqp091.Table
-}
-
-// QueueConfig defines a queue declaration.
-type QueueConfig struct {
-	Name       string
-	Durable    bool
-	AutoDelete bool
-	Exclusive  bool
-	NoWait     bool
-	Args       amqp091.Table
-}
-
-// RetryPolicy defines how retries should be handled for a topology.
-type RetryPolicy struct {
-	MaxRetries      int
-	RetryWithDLXTTL bool
-	RetryTTL        time.Duration
-	RetryExchange   string
-	RetryQueue      string
-	DLXName         string
-	DLQName         string
-}
-
-// RabbitTopology describes a queue topology with optional DLX/DLQ and retry policy.
-type RabbitTopology struct {
-	Exchange ExchangeConfig
-	Queue    QueueConfig
-	Bindings []BindingConfig
-	DLXName  string
-	DLX      DLXOptions
-	DLQName  string
-	DLQ      DLQOptions
-	Retry    RetryPolicy
+	MaxRetries int // Maximum number of retries before sending to DLQ (0 = disabled, requeue on failure)
+	// Final DLQ publishing (when MaxRetries exceeded)
+	FinalDLX           string // Exchange name for final DLQ (usually direct)
+	FinalDLQRoutingKey string // Routing key for final DLQ binding (often dlq queue name)
 }
 
 // QueueOptions contains options for declaring a queue with DLX support
@@ -186,24 +124,6 @@ type DLQOptions struct {
 	Args       amqp091.Table
 }
 
-// RetryTTLTopologyOptions configures a standard RabbitMQ retry setup using retry queue + TTL.
-//
-// Pattern:
-// - main queue dead-letters to retry exchange/queue on Nack(requeue=false)
-// - retry queue has x-message-ttl and dead-letters back to main queue (default exchange)
-// - DLQ exists for final failure handling (consumer can publish there when retries exceeded)
-type RetryTTLTopologyOptions struct {
-	Durable        bool
-	RetryTTL       time.Duration // e.g. 10s, 30s
-	MaxPriority    uint8
-	AdditionalArgs amqp091.Table
-	// Naming overrides (optional)
-	RetryExchange string // default: "<queue>.retry.dlx"
-	RetryQueue    string // default: "<queue>.retry"
-	DLQName       string // default: "<queue>.dlq"
-	DLXName       string // default: "<queue>.dlx"
-}
-
 // RabbitMQClient interface defines methods for RabbitMQ operations
 type RabbitMQClient interface {
 	// Publish publishes a message to an exchange
@@ -214,10 +134,6 @@ type RabbitMQClient interface {
 	Consume(ctx context.Context, queue string, handler MessageHandler) error
 	// ConsumeWithOptions starts consuming messages with custom options
 	ConsumeWithOptions(ctx context.Context, queue string, handler MessageHandler, options ConsumeOptions) error
-	// ConsumeWithTopology ensures topology before consuming from the queue
-	ConsumeWithTopology(ctx context.Context, topology RabbitTopology, handler MessageHandler, options ConsumeOptions) error
-	// EnsureTopology declares exchanges, queues, DLX/DLQ and bindings for the supplied topology
-	EnsureTopology(ctx context.Context, topology RabbitTopology) error
 	// DeclareQueue declares a queue
 	DeclareQueue(ctx context.Context, queue string, durable, autoDelete, exclusive, noWait bool, args amqp091.Table) error
 	// DeclareQueueWithDLX declares a queue with Dead Letter Exchange support
@@ -234,192 +150,6 @@ type RabbitMQClient interface {
 	BindQueue(ctx context.Context, queue, routingKey, exchange string, noWait bool, args amqp091.Table) error
 	// Close closes the connection
 	Close() error
-}
-
-// SetupRetryTTLTopology declares a queue topology for DLX/TTL retries.
-//
-// It does NOT change consume behavior by itself. To actually use x-death-based retries,
-// consume with ConsumeOptions{MaxRetries: N, RetryWithDLXTTL: true, DLQName: "<queue>.dlq"}.
-func SetupRetryTTLTopology(ctx context.Context, client RabbitMQClient, queue string, opt RetryTTLTopologyOptions) error {
-	if opt.Durable == false {
-		// default durable for retry topology
-		opt.Durable = true
-	}
-	if opt.RetryTTL <= 0 {
-		opt.RetryTTL = 10 * time.Second
-	}
-	retryExchange := opt.RetryExchange
-	if retryExchange == "" {
-		retryExchange = queue + ".retry.dlx"
-	}
-	retryQueue := opt.RetryQueue
-	if retryQueue == "" {
-		retryQueue = queue + ".retry"
-	}
-	dlxName := opt.DLXName
-	if dlxName == "" {
-		dlxName = queue + ".dlx"
-	}
-	dlqName := opt.DLQName
-	if dlqName == "" {
-		dlqName = queue + ".dlq"
-	}
-
-	// Retry exchange and retry queue (TTL then dead-letter back to main queue via default exchange).
-	if err := client.DeclareExchange(ctx, retryExchange, "direct", true, false, false, false, nil); err != nil {
-		return err
-	}
-	retryArgs := amqp091.Table{
-		"x-message-ttl":             int(opt.RetryTTL.Milliseconds()),
-		"x-dead-letter-exchange":    "",    // default exchange
-		"x-dead-letter-routing-key": queue, // route back to main queue
-	}
-	if opt.MaxPriority > 0 {
-		retryArgs["x-max-priority"] = opt.MaxPriority
-	}
-	if opt.AdditionalArgs != nil {
-		for k, v := range opt.AdditionalArgs {
-			retryArgs[k] = v
-		}
-	}
-	if err := client.DeclareQueue(ctx, retryQueue, opt.Durable, false, false, false, retryArgs); err != nil {
-		return err
-	}
-	if err := client.BindQueue(ctx, retryQueue, retryQueue, retryExchange, false, nil); err != nil {
-		return err
-	}
-
-	// Main queue: dead-letter to retry exchange/queue.
-	if err := client.DeclareQueueWithDLX(ctx, queue, QueueOptions{
-		Durable:        opt.Durable,
-		AutoDelete:     false,
-		Exclusive:      false,
-		NoWait:         false,
-		DLXName:        retryExchange,
-		DLXRoutingKey:  retryQueue,
-		MaxPriority:    opt.MaxPriority,
-		AdditionalArgs: opt.AdditionalArgs,
-	}); err != nil {
-		return err
-	}
-
-	// DLQ: used when retries exceeded (consumer publishes here).
-	if err := client.DeclareDLX(ctx, dlxName, DLXOptions{Kind: "direct", Durable: true}); err != nil {
-		return err
-	}
-	if err := client.DeclareDLQ(ctx, dlqName, dlxName, DLQOptions{Durable: true}); err != nil {
-		return err
-	}
-	if err := client.BindQueue(ctx, dlqName, dlqName, dlxName, false, nil); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// EnsureTopology declares exchanges, queues, DLX/DLQ and bindings from topology definition.
-func (r *rabbitmqClient) EnsureTopology(ctx context.Context, topology RabbitTopology) error {
-	if topology.Exchange.Name != "" {
-		kind := topology.Exchange.Kind
-		if kind == "" {
-			kind = "direct"
-		}
-		if err := r.DeclareExchange(ctx, topology.Exchange.Name, kind, topology.Exchange.Durable, topology.Exchange.AutoDelete, topology.Exchange.Internal, topology.Exchange.NoWait, topology.Exchange.Args); err != nil {
-			return err
-		}
-	}
-
-	if topology.Retry.RetryWithDLXTTL {
-		if topology.Retry.RetryTTL <= 0 {
-			topology.Retry.RetryTTL = 10 * time.Second
-		}
-		if topology.Retry.RetryExchange == "" {
-			topology.Retry.RetryExchange = topology.Queue.Name + ".retry.dlx"
-		}
-		if topology.Retry.RetryQueue == "" {
-			topology.Retry.RetryQueue = topology.Queue.Name + ".retry"
-		}
-		if topology.Retry.DLXName == "" {
-			topology.Retry.DLXName = topology.Queue.Name + ".dlx"
-		}
-		if topology.Retry.DLQName == "" {
-			topology.Retry.DLQName = topology.Queue.Name + ".dlq"
-		}
-
-		if err := SetupRetryTTLTopology(ctx, r, topology.Queue.Name, RetryTTLTopologyOptions{
-			Durable:        topology.Queue.Durable,
-			RetryTTL:       topology.Retry.RetryTTL,
-			MaxPriority:    0,
-			AdditionalArgs: topology.Queue.Args,
-			RetryExchange:  topology.Retry.RetryExchange,
-			RetryQueue:     topology.Retry.RetryQueue,
-			DLQName:        topology.Retry.DLQName,
-			DLXName:        topology.Retry.DLXName,
-		}); err != nil {
-			return err
-		}
-	} else {
-		queueOpts := QueueOptions{
-			Durable:        topology.Queue.Durable,
-			AutoDelete:     topology.Queue.AutoDelete,
-			Exclusive:      topology.Queue.Exclusive,
-			NoWait:         topology.Queue.NoWait,
-			DLXName:        topology.DLXName,
-			DLXRoutingKey:  topology.Queue.Name,
-			MaxRetries:     topology.Retry.MaxRetries,
-			MessageTTL:     0,
-			MaxLength:      0,
-			MaxPriority:    0,
-			AdditionalArgs: topology.Queue.Args,
-		}
-		if err := r.DeclareQueueWithDLX(ctx, topology.Queue.Name, queueOpts); err != nil {
-			return err
-		}
-
-		if topology.DLXName != "" {
-			if err := r.DeclareDLX(ctx, topology.DLXName, topology.DLX); err != nil {
-				return err
-			}
-		}
-		if topology.DLQName != "" {
-			if err := r.DeclareDLQ(ctx, topology.DLQName, topology.DLXName, topology.DLQ); err != nil {
-				return err
-			}
-			if err := r.BindQueue(ctx, topology.DLQName, topology.DLQName, topology.DLXName, false, nil); err != nil {
-				return err
-			}
-		}
-	}
-
-	for _, binding := range topology.Bindings {
-		queue := binding.Queue
-		if queue == "" {
-			queue = topology.Queue.Name
-		}
-		exchange := binding.Exchange
-		if exchange == "" {
-			exchange = topology.Exchange.Name
-		}
-		if queue == "" || exchange == "" {
-			continue
-		}
-		if err := r.BindQueue(ctx, queue, binding.RoutingKey, exchange, binding.NoWait, binding.Args); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// ConsumeWithTopology ensures topology exists before consuming.
-func (r *rabbitmqClient) ConsumeWithTopology(ctx context.Context, topology RabbitTopology, handler MessageHandler, options ConsumeOptions) error {
-	if err := r.EnsureTopology(ctx, topology); err != nil {
-		return err
-	}
-	if topology.Queue.Name == "" {
-		return fmt.Errorf("queue name is required for ConsumeWithTopology")
-	}
-	return r.ConsumeWithOptions(ctx, topology.Queue.Name, handler, options)
 }
 
 // rabbitmqClient implements RabbitMQClient interface
@@ -907,10 +637,16 @@ func (r *rabbitmqClient) ConsumeWithOptions(ctx context.Context, queue string, h
 				continue
 			}
 
-			if options.PrefetchCount > 0 {
-				if err := consumeCh.Qos(options.PrefetchCount, 0, options.PrefetchGlobal); err != nil {
+			if !options.AutoAck {
+				if err := consumeCh.Qos(1, 0, false); err != nil {
 					_ = consumeCh.Close()
+					if r.logger != nil {
+						r.logger.Errorf("Failed to set QoS, will retry: queue=%s, consumer=%s, error=%s", queue, consumer, err.Error())
+					}
 					time.Sleep(backoff)
+					if backoff < 2*time.Second {
+						backoff *= 2
+					}
 					continue
 				}
 			}
@@ -1004,135 +740,67 @@ func (r *rabbitmqClient) ConsumeWithOptions(ctx context.Context, queue string, h
 
 					// Reject message if not auto-ack
 					if !options.AutoAck {
-						// Handle retry logic if MaxRetries is configured
-						shouldRequeue := true
-						retryRepublished := false
-						if options.MaxRetries > 0 {
-							retryCount := r.getRetryCount(delivery)
-							deliverySpan.SetAttributes(attribute.Int("rabbitmq.retry_count", retryCount))
-
-							if options.RetryWithDLXTTL {
-								// Count dead-letter cycles based on x-death for this queue.
-								// This only increases when we Nack(requeue=false) and broker dead-letters.
-								retryCount = r.getXDeathCountForQueue(delivery, queue)
-								deliverySpan.SetAttributes(attribute.Int("rabbitmq.retry_count", retryCount))
+						// Retry strategy:
+						// - If MaxRetries == 0: Nack(requeue=true) (legacy: broker redelivers same delivery)
+						// - If MaxRetries  > 0: republish to the same exchange/routing key with incremented x-retry-count,
+						//   then Ack (message re-enters the queue via the exchange binding). After MaxRetries failures, publish to DLQ.
+						if options.MaxRetries <= 0 {
+							if err := delivery.Nack(false, true); err != nil && r.logger != nil {
+								r.logger.Errorf("Failed to nack message (requeue): error=%s", err.Error())
 							}
+						} else {
+							failuresSoFar := r.applicationFailureCount(delivery)
+							deliverySpan.SetAttributes(attribute.Int("rabbitmq.failure_count", failuresSoFar))
 
-							if retryCount >= options.MaxRetries {
-								// Max retries exceeded, reject without requeue to send to DLQ
-								shouldRequeue = false
+							if failuresSoFar+1 >= options.MaxRetries {
 								if r.logger != nil {
-									r.logger.Warnf("Message exceeded max retries: queue=%s, message_id=%s, retry_count=%d, max_retries=%d, sending to DLQ",
-										queue, delivery.MessageId, retryCount, options.MaxRetries)
+									r.logger.Warnf("Message exceeded max retries: queue=%s, message_id=%s, failures=%d, max_retries=%d, sending to DLQ",
+										queue, delivery.MessageId, failuresSoFar+1, options.MaxRetries)
 								}
 								deliverySpan.SetAttributes(
 									attribute.Bool("rabbitmq.sent_to_dlq", true),
-									attribute.Int("rabbitmq.max_retries_exceeded", retryCount),
+									attribute.Int("rabbitmq.max_retries_exceeded", failuresSoFar+1),
 								)
-							} else {
-								if options.RetryWithDLXTTL {
-									// DLX/TTL retry pattern: do NOT requeue.
-									// Nack(requeue=false) will dead-letter to retry queue (configured by queue args),
-									// then after TTL it will dead-letter back to main queue, incrementing x-death.
-									next := retryCount + 1
-									if r.logger != nil {
-										r.logger.Warnf("Message will be retried via DLX/TTL: queue=%s, message_id=%s, retry_count=%d/%d",
-											queue, delivery.MessageId, next, options.MaxRetries)
-									}
-									deliverySpan.SetAttributes(attribute.Int("rabbitmq.will_retry", next))
-								} else {
-									// Republish with incremented x-retry-count then Ack the original.
-									// Nack(requeue=true) never dead-letters, so x-death-based counting would stay at 0 forever.
-									next := retryCount + 1
-									if r.logger != nil {
-										r.logger.Warnf("Message will be retried: queue=%s, message_id=%s, retry_count=%d/%d",
-											queue, delivery.MessageId, next, options.MaxRetries)
-									}
-									deliverySpan.SetAttributes(attribute.Int("rabbitmq.will_retry", next))
 
-									pubOpts := PublishOptions{
-										ContentType: delivery.ContentType,
-										MessageID:   delivery.MessageId,
-										Headers:     cloneHeadersWithRetryCount(delivery.Headers, next),
-										Priority:    delivery.Priority,
-										Expiration:  delivery.Expiration,
-									}
-									exchange := delivery.Exchange
-									routingKey := delivery.RoutingKey
-									if routingKey == "" {
-										routingKey = queue
-									}
-									pubErr := r.PublishWithOptions(deliveryCtx, exchange, routingKey, delivery.Body, pubOpts)
+								if options.FinalDLX != "" && options.FinalDLQRoutingKey != "" {
+									pubErr := r.Publish(deliveryCtx, options.FinalDLX, options.FinalDLQRoutingKey, delivery.Body)
 									if pubErr != nil {
 										deliverySpan.RecordError(pubErr)
 										if r.logger != nil {
-											r.logger.Errorf("Failed to republish message for retry: queue=%s, message_id=%s, error=%s", queue, delivery.MessageId, pubErr.Error())
+											r.logger.Errorf("Failed to publish message to DLQ: dlx=%s, dlq_routing_key=%s, error=%s",
+												options.FinalDLX, options.FinalDLQRoutingKey, pubErr.Error())
 										}
-										if err := delivery.Nack(false, false); err != nil && r.logger != nil {
-											r.logger.Errorf("Failed to nack message (no requeue): error=%s", err.Error())
-										}
+										_ = delivery.Nack(false, true)
 									} else {
-										if err := delivery.Ack(false); err != nil && r.logger != nil {
-											r.logger.Errorf("Failed to ack message after republish: error=%s", err.Error())
-										}
-									}
-									retryRepublished = true
-								}
-							}
-						}
-
-						if !retryRepublished {
-							if shouldRequeue {
-								if options.MaxRetries > 0 && options.RetryWithDLXTTL {
-									// Retry via DLX/TTL (dead-letter).
-									if err := delivery.Nack(false, false); err != nil {
-										if r.logger != nil {
-											r.logger.Errorf("Failed to nack message (no requeue): error=%s", err.Error())
-										}
+										_ = delivery.Ack(false)
 									}
 								} else {
-									// Requeue message (will be retried; MaxRetries disabled)
-									if err := delivery.Nack(false, true); err != nil {
-										if r.logger != nil {
-											r.logger.Errorf("Failed to nack message: error=%s", err.Error())
-										}
-									}
+									_ = delivery.Nack(false, true)
 								}
 							} else {
-								if options.MaxRetries > 0 && options.RetryWithDLXTTL {
-									// Exceeded retries: publish to DLQ then Ack original so it doesn't loop via retry DLX.
-									dlqName := options.DLQName
-									if dlqName == "" {
-										dlqName = queue + ".dlq"
+								pubEx := delivery.Exchange
+								pubRK := delivery.RoutingKey
+								if pubEx == "" {
+									pubRK = queue
+								}
+								headers := cloneHeadersWithRetryCount(delivery.Headers, failuresSoFar+1)
+								pubOpts := PublishOptions{
+									Headers:     headers,
+									ContentType: delivery.ContentType,
+								}
+								if delivery.MessageId != "" {
+									pubOpts.MessageID = delivery.MessageId
+								}
+								pubErr := r.PublishWithOptions(deliveryCtx, pubEx, pubRK, delivery.Body, pubOpts)
+								if pubErr != nil {
+									deliverySpan.RecordError(pubErr)
+									if r.logger != nil {
+										r.logger.Errorf("Failed to republish message for retry: exchange=%s routing_key=%s error=%s",
+											pubEx, pubRK, pubErr.Error())
 									}
-									pubErr := r.PublishWithOptions(deliveryCtx, "", dlqName, delivery.Body, PublishOptions{
-										ContentType: delivery.ContentType,
-										MessageID:   delivery.MessageId,
-										Headers:     maps.Clone(delivery.Headers),
-										Priority:    delivery.Priority,
-										Expiration:  delivery.Expiration,
-									})
-									if pubErr != nil {
-										deliverySpan.RecordError(pubErr)
-										if r.logger != nil {
-											r.logger.Errorf("Failed to publish message to DLQ: queue=%s, dlq=%s, message_id=%s, error=%s", queue, dlqName, delivery.MessageId, pubErr.Error())
-										}
-										// Best-effort: reject to DLX (may go to retry DLX depending on queue args).
-										if err := delivery.Nack(false, false); err != nil && r.logger != nil {
-											r.logger.Errorf("Failed to nack message (no requeue): error=%s", err.Error())
-										}
-									} else {
-										if err := delivery.Ack(false); err != nil && r.logger != nil {
-											r.logger.Errorf("Failed to ack message after publishing to DLQ: error=%s", err.Error())
-										}
-									}
-								} else {
-									// Reject without requeue (will be sent to DLQ if configured)
-									if err := delivery.Nack(false, false); err != nil {
-										if r.logger != nil {
-											r.logger.Errorf("Failed to nack message (no requeue): error=%s", err.Error())
-										}
-									}
+									_ = delivery.Nack(false, true)
+								} else if err := delivery.Ack(false); err != nil && r.logger != nil {
+									r.logger.Errorf("Failed to ack message after republish: error=%s", err.Error())
 								}
 							}
 						}
@@ -1371,15 +1039,15 @@ func (r *rabbitmqClient) DeclareQueueWithDLX(ctx context.Context, queue string, 
 	// Set up Dead Letter Exchange if provided
 	if options.DLXName != "" {
 		args["x-dead-letter-exchange"] = options.DLXName
-		dlxRoutingKey := options.DLXRoutingKey
-		if dlxRoutingKey == "" {
-			dlxRoutingKey = queue // Default to queue name as routing key
+		// If DLXRoutingKey is empty, RabbitMQ will use the message's original routing key.
+		// This is important for retry-queue patterns that rely on preserving routing keys.
+		if options.DLXRoutingKey != "" {
+			args["x-dead-letter-routing-key"] = options.DLXRoutingKey
 		}
-		args["x-dead-letter-routing-key"] = dlxRoutingKey
-		span.SetAttributes(
-			attribute.String("rabbitmq.dlx", options.DLXName),
-			attribute.String("rabbitmq.dlx_routing_key", dlxRoutingKey),
-		)
+		span.SetAttributes(attribute.String("rabbitmq.dlx", options.DLXName))
+		if options.DLXRoutingKey != "" {
+			span.SetAttributes(attribute.String("rabbitmq.dlx_routing_key", options.DLXRoutingKey))
+		}
 	}
 
 	// Set message TTL if provided
@@ -1679,7 +1347,7 @@ func (r *rabbitmqClient) SetupDLXForQueue(ctx context.Context, queueName, dlxNam
 }
 
 // cloneHeadersWithRetryCount returns a copy of headers with x-retry-count set and x-death removed
-// so republished retries do not mix DLX metadata with the explicit counter.
+// so republished retries use a single explicit failure counter.
 func cloneHeadersWithRetryCount(headers amqp091.Table, retryCount int) amqp091.Table {
 	h := maps.Clone(headers)
 	if h == nil {
@@ -1690,69 +1358,12 @@ func cloneHeadersWithRetryCount(headers amqp091.Table, retryCount int) amqp091.T
 	return h
 }
 
-// getXDeathCountForQueue returns RabbitMQ x-death.count for the given queue, if present.
-// x-death is only updated when broker dead-letters a message (reject/requeue=false, ttl, overflow...).
-func (r *rabbitmqClient) getXDeathCountForQueue(delivery amqp091.Delivery, queue string) int {
+// applicationFailureCount is how many handler failures have already been recorded on this message
+// via x-retry-count from prior republish retries (0 for first delivery from the publisher).
+func (r *rabbitmqClient) applicationFailureCount(delivery amqp091.Delivery) int {
 	if delivery.Headers == nil {
 		return 0
 	}
-	xDeath, ok := delivery.Headers["x-death"]
-	if !ok {
-		return 0
-	}
-	deaths, ok := xDeath.([]interface{})
-	if !ok {
-		return 0
-	}
-	for _, d := range deaths {
-		m, ok := d.(amqp091.Table)
-		if !ok {
-			// Sometimes headers decode as map[string]interface{}.
-			if mm, ok := d.(map[string]interface{}); ok {
-				if q, _ := mm["queue"].(string); q == queue {
-					if c, ok := mm["count"]; ok {
-						switch v := c.(type) {
-						case int:
-							return v
-						case int32:
-							return int(v)
-						case int64:
-							return int(v)
-						case float64:
-							return int(v)
-						}
-					}
-				}
-			}
-			continue
-		}
-		if q, _ := m["queue"].(string); q != queue {
-			continue
-		}
-		if c, ok := m["count"]; ok {
-			switch v := c.(type) {
-			case int:
-				return v
-			case int32:
-				return int(v)
-			case int64:
-				return int(v)
-			case float64:
-				return int(v)
-			}
-		}
-	}
-	return 0
-}
-
-// getRetryCount extracts retry count from message headers
-// Returns 0 if not found or invalid
-func (r *rabbitmqClient) getRetryCount(delivery amqp091.Delivery) int {
-	if delivery.Headers == nil {
-		return 0
-	}
-
-	// Check for x-retry-count header (our custom header)
 	if retryCount, ok := delivery.Headers["x-retry-count"]; ok {
 		switch v := retryCount.(type) {
 		case int:
@@ -1765,15 +1376,6 @@ func (r *rabbitmqClient) getRetryCount(delivery amqp091.Delivery) int {
 			return int(v)
 		}
 	}
-
-	// Also check x-death (only present after dead-lettering). Not updated on Nack(requeue=true).
-	// Length is a rough hint; prefer x-retry-count for bounded retries in this client.
-	if xDeath, ok := delivery.Headers["x-death"]; ok {
-		if deaths, ok := xDeath.([]interface{}); ok {
-			return len(deaths)
-		}
-	}
-
 	return 0
 }
 

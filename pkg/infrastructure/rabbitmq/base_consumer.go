@@ -28,19 +28,13 @@ type BaseConsumer struct {
 	logger    *logrus.Logger
 	exchange  string
 	queueName string
+	finalDLX  string
+	finalDLQ  string
 	handler   ConsumerHandler
 	tracer    trace.Tracer
 }
 
-func NewBaseConsumer(
-	client RabbitMQClient,
-	logger *logrus.Logger,
-	exchange string,
-	queueName string,
-	handler ConsumerHandler,
-) *BaseConsumer {
-	return NewBaseConsumerWithTracer(client, logger, nil, exchange, queueName, handler)
-}
+const defaultMaxRetries = 3
 
 func NewBaseConsumerWithTracer(
 	client RabbitMQClient,
@@ -48,6 +42,8 @@ func NewBaseConsumerWithTracer(
 	tracerProvider trace.TracerProvider,
 	exchange string,
 	queueName string,
+	finalDLX string,
+	finalDLQ string,
 	handler ConsumerHandler,
 ) *BaseConsumer {
 	if tracerProvider == nil {
@@ -58,6 +54,8 @@ func NewBaseConsumerWithTracer(
 		logger:    logger,
 		exchange:  exchange,
 		queueName: queueName,
+		finalDLX:  finalDLX,
+		finalDLQ:  finalDLQ,
 		handler:   handler,
 		tracer:    tracerProvider.Tracer("msa.consumers"),
 	}
@@ -68,6 +66,10 @@ func (b *BaseConsumer) Start(ctx context.Context) *common.ErrorResponse {
 
 	consumeOptions := ConsumeOptions{
 		AutoAck: false,
+		// Failed handling republishes with x-retry-count until MaxRetries; then publishes to Final DLQ.
+		MaxRetries:         defaultMaxRetries,
+		FinalDLX:           b.finalDLX,
+		FinalDLQRoutingKey: b.finalDLQ,
 	}
 
 	handler := MessageHandler(func(ctx context.Context, delivery amqp091.Delivery) error {
