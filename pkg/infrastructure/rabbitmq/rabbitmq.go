@@ -3,9 +3,11 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -130,6 +132,8 @@ type RabbitMQClient interface {
 	Publish(ctx context.Context, exchange, routingKey string, message any) error
 	// PublishWithOptions publishes a message with custom options
 	PublishWithOptions(ctx context.Context, exchange, routingKey string, message any, options PublishOptions) error
+	// PublishEventAsync publishes an event asynchronously
+	PublishEventAsync(ctx context.Context, data any, exchange, entityID, entityType, action string) error
 	// Consume starts consuming messages from a queue
 	Consume(ctx context.Context, queue string, handler MessageHandler) error
 	// ConsumeWithOptions starts consuming messages with custom options
@@ -829,6 +833,34 @@ func (r *rabbitmqClient) ConsumeWithOptions(ctx context.Context, queue string, h
 	}()
 
 	return nil
+}
+
+func (r *rabbitmqClient) PublishEventAsync(ctx context.Context, data any, exchange, entityID, entityType, action string) error {
+	ch := make(chan error, 1)
+
+	if r == nil || strings.TrimSpace(exchange) == "" {
+		ch <- errors.New("rabbitmq client or exchange not configured")
+		close(ch)
+		return <-ch
+	}
+
+	asyncCtx := context.WithoutCancel(ctx)
+	go func(data any) {
+		defer close(ch)
+
+		message := NewRabbitMQMessage(action, entityType, entityID, data)
+		routingKey := entityType + "." + action
+
+		r.logger.Infof("publish event: routing_key=%s, entity_id=%s", routingKey, entityID)
+
+		err := r.Publish(asyncCtx, exchange, routingKey, message)
+		if err != nil {
+			r.logger.Errorf("publish event failed: routing_key=%s, entity_id=%s, error=%v", routingKey, entityID, err)
+		}
+		ch <- err
+	}(data)
+
+	return <-ch
 }
 
 // DeclareQueue declares a queue
