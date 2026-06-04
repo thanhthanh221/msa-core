@@ -16,6 +16,7 @@ MSA Core is a comprehensive core module designed to provide essential infrastruc
   - **Redis** (`pkg/infrastructure/redis`): High-performance Redis client with OpenTelemetry tracing support, cluster mode, and comprehensive operations
   - **RabbitMQ** (`pkg/infrastructure/rabbitmq`): Message queue client with DLX/DLQ support, distributed tracing, and full exchange/queue management
   - **GORM Repository** (`pkg/infrastructure/repositories`): Generic repository pattern with GORM, OpenTelemetry tracing support, transaction management, and comprehensive CRUD operations
+  - **MongoDB** (`pkg/infrastructure/mongodb`): MongoDB client and generic repository with OpenTelemetry tracing, CRUD operations, and transaction support
   - **MinIO** (`pkg/infrastructure/minio`): S3-compatible object storage client with OpenTelemetry tracing
   - **Cloudinary** (`pkg/infrastructure/cloudinary`): Media management and transformation service
 
@@ -137,6 +138,67 @@ func main() {
     }
     
     fmt.Println("Value:", value)
+}
+```
+
+### Using MongoDB Client and Repository
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/sirupsen/logrus"
+    "go.mongodb.org/mongo-driver/bson"
+    "go.mongodb.org/mongo-driver/bson/primitive"
+    "go.opentelemetry.io/otel/trace"
+
+    "github.com/thanhthanh221/msa-core/pkg/infrastructure/mongodb"
+)
+
+type User struct {
+    ID        primitive.ObjectID `bson:"_id,omitempty"`
+    Name      string             `bson:"name"`
+    Email     string             `bson:"email"`
+    CreatedAt time.Time          `bson:"created_at"`
+}
+
+func main() {
+    logger := logrus.New()
+    tracer := trace.NewNoopTracerProvider()
+    ctx := context.Background()
+
+    mc, err := mongodb.NewMongoClient(ctx, mongodb.Config{
+        URI:      "mongodb://localhost:27017",
+        Database: "mydb",
+    }, tracer)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer mc.Disconnect(ctx)
+
+    repo := mongodb.NewMongoRepository(mc, "users", logger, tracer, "", "")
+
+    user := &User{
+        Name:      "John Doe",
+        Email:     "john@example.com",
+        CreatedAt: time.Now(),
+    }
+    if err := repo.Create(ctx, user); err != nil {
+        log.Fatal(err)
+    }
+
+    var found User
+    if err := repo.GetOneByID(ctx, &found, user.ID); err != nil {
+        log.Fatal(err)
+    }
+
+    if err := repo.UpdateOneByID(ctx, user.ID, bson.M{"name": "Jane Doe"}); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -534,6 +596,11 @@ msa-core/
 │   │   │   ├── repository.go
 │   │   │   ├── types.go
 │   │   │   └── errors.go
+│   │   ├── mongodb/           # MongoDB client and repository with tracing
+│   │   │   ├── mongo.go
+│   │   │   ├── repository.go
+│   │   │   ├── types.go
+│   │   │   └── errors.go
 │   │   ├── minio/             # MinIO (S3) client
 │   │   │   └── minio.go
 │   │   └── cloudinary/        # Cloudinary client
@@ -583,6 +650,12 @@ msa-core/
   - Raw SQL query support
   - Error handling with proper error types
   - Support for multiple database types (MySQL, PostgreSQL, SQLite)
+- **MongoDB** (`pkg/infrastructure/mongodb`): MongoDB client and generic repository with:
+  - Connection management with configurable pool and timeouts
+  - OpenTelemetry distributed tracing
+  - CRUD operations (Create, Find, Update, Delete, Count)
+  - Filter-based queries and pagination
+  - Multi-document transactions via `SessionRepository`
 - **MinIO** (`pkg/infrastructure/minio`): S3-compatible object storage client with OpenTelemetry tracing
 - **Cloudinary** (`pkg/infrastructure/cloudinary`): Media management and transformation service
 
@@ -675,6 +748,7 @@ See [Makefile](Makefile) for all available commands.
 - [RabbitMQ AMQP Client](https://github.com/rabbitmq/amqp091-go) - Official RabbitMQ client for Go
 - [GORM](https://gorm.io/) - The fantastic ORM library for Go
 - [GORM Drivers](https://gorm.io/docs/connecting_to_the_database.html) - Database drivers for MySQL, PostgreSQL, SQLite
+- [MongoDB Go Driver](https://www.mongodb.com/docs/drivers/go/current/) - Official MongoDB driver for Go
 - [OpenTelemetry](https://opentelemetry.io/) - Observability framework with Jaeger export support
 - [Jaeger](https://www.jaegertracing.io/) - Distributed tracing backend (via OpenTelemetry exporter)
 - [Logrus](https://github.com/sirupsen/logrus) - Structured logger
@@ -713,6 +787,7 @@ Then import the packages you need:
 
 ```go
 import (
+    "github.com/thanhthanh221/msa-core/pkg/infrastructure/mongodb"
     "github.com/thanhthanh221/msa-core/pkg/infrastructure/redis"
     "github.com/thanhthanh221/msa-core/pkg/infrastructure/rabbitmq"
     "github.com/thanhthanh221/msa-core/pkg/infrastructure/repositories"
