@@ -137,10 +137,8 @@ func (m *JWTAuthMiddleware) RequireScope(requiredScope string) echo.MiddlewareFu
 				c.SetRequest(req.WithContext(goCtx))
 			}
 
-			// Check if required scope is present
-			hasScope := slices.Contains(scopes, requiredScope)
-
-			if !hasScope {
+			// Check if required scope is present (exact, *, or module wildcard e.g. vendor.*)
+			if !hasScope(scopes, requiredScope) {
 				return c.JSON(http.StatusForbidden, map[string]string{
 					"error":             "insufficient_scope",
 					"error_description": "Insufficient scope. Required: " + requiredScope,
@@ -232,4 +230,30 @@ func (m *JWTAuthMiddleware) RequireRole(requiredRole string) echo.MiddlewareFunc
 			return next(c)
 		}
 	}
+}
+
+func hasScope(grantedScopes []string, required string) bool {
+	if required == "" {
+		return false
+	}
+
+	for _, granted := range grantedScopes {
+		if granted == "" {
+			continue
+		}
+		if granted == "*" {
+			return true
+		}
+		if granted == required {
+			return true
+		}
+		if strings.HasSuffix(granted, ".*") {
+			prefix := strings.TrimSuffix(granted, ".*")
+			if required == prefix || strings.HasPrefix(required, prefix+".") {
+				return true
+			}
+		}
+	}
+
+	return false
 }
