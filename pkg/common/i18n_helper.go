@@ -11,16 +11,22 @@ type contextKey string
 
 const I18nContextKey contextKey = "locale"
 
-// GetLocaleFromContext extracts locale from context
+// GetLocaleFromContext extracts locale from RequestContext (preferred) or legacy key.
 func GetLocaleFromContext(ctx context.Context) string {
-	if locale, ok := ctx.Value(I18nContextKey).(string); ok {
+	if rc, ok := Req(ctx); ok && rc.Locale != "" {
+		return rc.Locale
+	}
+	if locale, ok := ctx.Value(I18nContextKey).(string); ok && locale != "" {
 		return locale
 	}
 	return "vn" // default locale (Vietnamese)
 }
 
-// SetLocaleInContext sets locale in context
+// SetLocaleInContext sets locale on RequestContext (and legacy key for older call sites).
 func SetLocaleInContext(ctx context.Context, locale string) context.Context {
+	ctx = MergeRequest(ctx, func(rc *RequestContext) {
+		rc.Locale = locale
+	})
 	return context.WithValue(ctx, I18nContextKey, locale)
 }
 

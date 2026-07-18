@@ -9,10 +9,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/thanhthanh221/msa-core/pkg/common"
 	"github.com/thanhthanh221/msa-core/pkg/infrastructure/redis"
-	"github.com/thanhthanh221/msa-core/pkg/models"
 	services "github.com/thanhthanh221/msa-core/pkg/service"
 )
 
+// JWTAuthMiddleware handles JWT authentication for API calls
 // JWTAuthMiddleware handles JWT authentication for API calls
 type JWTAuthMiddleware struct {
 	logger     *logrus.Logger
@@ -31,7 +31,6 @@ func NewJWTAuthMiddleware(secretKey string, redisClient redis.RedisClient, logge
 func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Get Authorization header
 			authHeader := c.Request().Header.Get("Authorization")
 			if authHeader == "" {
 				return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -40,7 +39,6 @@ func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 				})
 			}
 
-			// Check if it's a Bearer token
 			if !strings.HasPrefix(authHeader, "Bearer ") {
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"error":             "invalid_authorization_header",
@@ -48,7 +46,6 @@ func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 				})
 			}
 
-			// Extract token
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 			if token == "" {
 				return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -57,7 +54,6 @@ func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 				})
 			}
 
-			// Validate token
 			claims, err := m.jwtService.ValidateToken(token)
 			if err != nil {
 				m.logger.Warn("Invalid JWT token: ", err)
@@ -67,17 +63,8 @@ func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 				})
 			}
 
-			// Put principal into both Echo context and request context (typed key)
-			c.Set("user", &claims.User)
-			c.Set("scopes", claims.Scopes)
+			InjectAuth(c, &claims.User, claims.Scopes, claims.SID)
 			c.Set("claims", claims)
-			c.Set("user_id", claims.User.ID)
-			c.Set("sid", claims.SID)
-
-			req := c.Request()
-			goCtx := common.WithUserID(req.Context(), claims.User.ID)
-			goCtx = common.WithSID(goCtx, claims.SID)
-			c.SetRequest(req.WithContext(goCtx))
 
 			return next(c)
 		}
@@ -88,10 +75,8 @@ func (m *JWTAuthMiddleware) RequireAuth() echo.MiddlewareFunc {
 func (m *JWTAuthMiddleware) RequireScope(requiredScope string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Prefer scopes already set by RequireAuth (if present)
-			scopes, ok := c.Get("scopes").([]string)
+			scopes, ok := common.Scopes(c.Request().Context())
 			if !ok || len(scopes) == 0 {
-				// Otherwise, validate token directly to make RequireScope independent
 				authHeader := c.Request().Header.Get("Authorization")
 				if authHeader == "" {
 					return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -125,19 +110,10 @@ func (m *JWTAuthMiddleware) RequireScope(requiredScope string) echo.MiddlewareFu
 				}
 
 				scopes = claims.Scopes
-				c.Set("user", &claims.User)
-				c.Set("scopes", claims.Scopes)
+				InjectAuth(c, &claims.User, claims.Scopes, claims.SID)
 				c.Set("claims", claims)
-				c.Set("user_id", claims.User.ID)
-				c.Set("sid", claims.SID)
-
-				req := c.Request()
-				goCtx := common.WithUserID(req.Context(), claims.User.ID)
-				goCtx = common.WithSID(goCtx, claims.SID)
-				c.SetRequest(req.WithContext(goCtx))
 			}
 
-			// Check if required scope is present (exact, *, or module wildcard e.g. vendor.*)
 			if !hasScope(scopes, requiredScope) {
 				return c.JSON(http.StatusForbidden, map[string]string{
 					"error":             "insufficient_scope",
@@ -154,18 +130,17 @@ func (m *JWTAuthMiddleware) RequireScope(requiredScope string) echo.MiddlewareFu
 func (m *JWTAuthMiddleware) RequireRole(requiredRole string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Prefer roles already set by RequireAuth / RequireScope (if present)
-			roles, ok := c.Get("roles").([]string)
+			roles, ok := common.Roles(c.Request().Context())
 			if !ok || len(roles) == 0 {
-				// Fallback to roles from user in context
-				if u, ok := c.Get("user").(*models.OAuthUser); ok && u != nil && len(u.Roles) > 0 {
+				if u, ok := UserFromGoContext(c.Request().Context()); ok && u != nil && len(u.Roles) > 0 {
 					roles = u.Roles
-					c.Set("roles", roles)
+					Bind(c, func(rc *common.RequestContext) {
+						rc.Roles = roles
+					})
 				}
 			}
 
 			if len(roles) == 0 {
-				// Otherwise, validate token directly to make RequireRole independent
 				authHeader := c.Request().Header.Get("Authorization")
 				if authHeader == "" {
 					return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -199,18 +174,8 @@ func (m *JWTAuthMiddleware) RequireRole(requiredRole string) echo.MiddlewareFunc
 				}
 
 				roles = claims.User.Roles
-
-				c.Set("user", &claims.User)
-				c.Set("scopes", claims.Scopes)
+				InjectAuth(c, &claims.User, claims.Scopes, claims.SID)
 				c.Set("claims", claims)
-				c.Set("user_id", claims.User.ID)
-				c.Set("sid", claims.SID)
-				c.Set("roles", roles)
-
-				req := c.Request()
-				goCtx := common.WithUserID(req.Context(), claims.User.ID)
-				goCtx = common.WithSID(goCtx, claims.SID)
-				c.SetRequest(req.WithContext(goCtx))
 			}
 
 			if len(roles) == 0 {
