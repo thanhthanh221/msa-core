@@ -1,8 +1,12 @@
-.PHONY: build test clean fmt vet lint help
+.PHONY: build test clean fmt vet lint help security
 
 # Variables
 BINARY_NAME=msa-core
-GO_VERSION=1.23.5
+GO_VERSION=1.27.4
+GOVULNCHECK_VERSION=v1.9.0
+
+security: ## Quét lỗ hổng dependency (không bỏ qua cảnh báo)
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -show verbose ./...
 
 help: ## Hiển thị help
 	@echo "Các lệnh có sẵn:"
