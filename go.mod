@@ -55,6 +55,5 @@ require (
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
-	golang.org/x/time v0.16.0 // indirect
 	gopkg.in/ini.v1 v1.68.0 // indirect
 )
